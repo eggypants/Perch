@@ -1,0 +1,1211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
+<title>Perch</title>
+<meta name="description" content="An envelope, not a verdict — pacing &amp; symptom tracker."/>
+<meta name="theme-color" content="#161F1B"/>
+<link rel="manifest" href="manifest.json"/>
+<meta name="apple-mobile-web-app-capable" content="yes"/>
+<meta name="mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+<meta name="apple-mobile-web-app-title" content="Perch"/>
+<link rel="apple-touch-icon" href="icon-180.png"/>
+<link rel="icon" type="image/png" href="icon-192.png"/>
+<style>html,body{margin:0;background:#161F1B}#root{min-height:100vh}
+#boot{color:#6E7B73;font:12px ui-monospace,monospace;display:flex;align-items:center;justify-content:center;min-height:100vh}</style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prop-types/15.8.1/prop-types.min.js"></script>
+<script src="https://unpkg.com/recharts@2.12.7/umd/Recharts.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+</head>
+<body>
+<div id="root"><div id="boot">opening the ledger…</div></div>
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useMemo } = React;
+const { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } = window.Recharts || {};
+
+/* ————— design tokens: "evening instrument" ————— */
+const T = {
+  bg: "#161F1B",
+  panel: "#1F2B25",
+  panelUp: "#26332C",
+  line: "#33423A",
+  text: "#EAE3D1",
+  faded: "#96A29A",
+  dim: "#6E7B73",
+  sage: "#8FBF9F",
+  marigold: "#E0B25255",
+  marigoldFull: "#E0B252",
+  coral: "#D9705F",
+  ink: "#101714",
+};
+
+const FONT_LINK =
+  "https://fonts.googleapis.com/css2?family=Young+Serif&family=Archivo:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap";
+const UI = "'Archivo', system-ui, sans-serif";
+const DISPLAY = "'Young Serif', Georgia, serif";
+const MONO = "'IBM Plex Mono', ui-monospace, monospace";
+
+/* ————— date helpers (local time, no UTC drift) ————— */
+const dstr = (dt) =>
+  `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(
+    dt.getDate()
+  ).padStart(2, "0")}`;
+const todayStr = () => dstr(new Date());
+const addDays = (s, n) => {
+  const [y, m, d] = s.split("-").map(Number);
+  return dstr(new Date(y, m - 1, d + n));
+};
+const niceDate = (s) => {
+  const [y, m, d] = s.split("-").map(Number);
+  return new Date(y, m - 1, d).toLocaleDateString("en-AU", {
+    weekday: "short", day: "numeric", month: "short",
+  });
+};
+const shortDate = (s) => {
+  const [y, m, d] = s.split("-").map(Number);
+  return new Date(y, m - 1, d).toLocaleDateString("en-AU", { day: "numeric", month: "short" });
+};
+const diffDays = (a, b) => {
+  const [y1, m1, d1] = a.split("-").map(Number);
+  const [y2, m2, d2] = b.split("-").map(Number);
+  return Math.round((new Date(y2, m2 - 1, d2) - new Date(y1, m1 - 1, d1)) / 86400000);
+};
+
+/* ————— defaults & schema ————— */
+const DEFAULT_SETTINGS = {
+  categories: [
+    {
+      id: "pain", name: "Pain",
+      items: ["Headaches", "Neck pain", "Upper back pain", "Lower back pain",
+        "Glute / sciatica", "Cervical radiculopathy", "Knee pain", "Shoulder pain"],
+    },
+    {
+      id: "cfs", name: "CFS / FM",
+      items: ["Fatigue", "Low energy", "Malaise", "Aches (non-structural)", "Allodynia", "PEM crash"],
+    },
+    {
+      id: "dysauto", name: "Dysautonomia",
+      items: ["Palpitations", "Orthostatic intolerance", "Thermoregulation", "Nausea"],
+    },
+  ],
+  ibsTags: ["Diarrhoea", "Constipation", "Pain", "Bloating", "Urgency"],
+  mindTags: ["Anxious", "Low", "Irritable", "Overstimulated", "Foggy", "Word-finding", "PMDD flare"],
+  triggers: ["FODMAP slip", "Caffeine late", "Low fluids/salt", "No compression", "Screen-heavy evening", "Poor pacing"],
+  meds: [],
+  watchlist: ["Lower back pain", "Fatigue", "Headaches"],
+};
+
+/* meds saved as plain strings (v2.0) get parsed into { name, dose } */
+const parseMed = (m) => {
+  if (typeof m !== "string") return { name: m.name, dose: m.dose || "" };
+  const match = m.match(/^(.+?)\s+([\d.]+\s*(?:mg|mcg|g|iu)\b.*)$/i);
+  return match ? { name: match[1], dose: match[2] } : { name: m, dose: "" };
+};
+
+const ENV = {
+  green: { label: "Within envelope", desc: "Today fit inside my limits", color: "#8FBF9F" },
+  amber: { label: "Stretched", desc: "Pushed at the edges", color: "#E0B252" },
+  red: { label: "Overdrawn", desc: "Borrowed from tomorrow", color: "#D9705F" },
+};
+const IBS_LEVELS = {
+  green: { label: "Settled", color: "#8FBF9F", v: 0 },
+  amber: { label: "Grumbly", color: "#E0B252", v: 1 },
+  red: { label: "Flared", color: "#D9705F", v: 2 },
+};
+const SCALE5 = ["None", "Light", "Moderate", "Heavy", "Extreme"];
+const SLEEP5 = ["Awful", "Poor", "OK", "Good", "Great"];
+const SEV4 = ["None", "Mild", "Moderate", "Severe"];
+const STORE_KEY = "perch-tracker-v1";
+
+const emptyEntry = () => ({
+  env: "green", phys: null, cog: null,
+  sleepQ: null, sleepH: "", sleepBroken: null,
+  sym: {}, ibs: { level: "green", tags: [] },
+  mind: { cognitive: null, mood: null, tags: [] },
+  trig: [], meds: [], period: false, note: "",
+});
+const hydrate = (e) => ({
+  ...emptyEntry(), ...e,
+  ibs: { ...emptyEntry().ibs, ...(e?.ibs || {}) },
+  mind: { ...emptyEntry().mind, ...(e?.mind || {}) },
+  meds: (e?.meds || []).map(parseMed),
+});
+const migrate = (d) => {
+  const s = { ...DEFAULT_SETTINGS, ...(d?.settings || {}) };
+  s.meds = (s.meds || []).map(parseMed);
+  s.watchlist = s.watchlist || DEFAULT_SETTINGS.watchlist;
+  return { version: 3, settings: s, days: d?.days || {} };
+};
+
+/* ————— stats ————— */
+function pearson(xs, ys) {
+  const n = xs.length;
+  if (n < 3) return null;
+  const mx = xs.reduce((a, b) => a + b, 0) / n;
+  const my = ys.reduce((a, b) => a + b, 0) / n;
+  let num = 0, dx = 0, dy = 0;
+  for (let i = 0; i < n; i++) {
+    num += (xs[i] - mx) * (ys[i] - my);
+    dx += (xs[i] - mx) ** 2;
+    dy += (ys[i] - my) ** 2;
+  }
+  const den = Math.sqrt(dx) * Math.sqrt(dy);
+  if (den === 0) return null;
+  return num / den;
+}
+
+const allSymptoms = (settings) => settings.categories.flatMap((c) => c.items);
+const catTotal = (cat) => (e) => cat.items.reduce((a, s) => a + ((e.sym || {})[s] || 0), 0);
+/* the engine tests composites, not every chip — chips stay the data entry,
+   categories are the unit of analysis; watchlist symptoms also get tested solo */
+const outcomesOf = (settings) => [
+  ...settings.categories.map((c) => ({
+    key: `cat:${c.id}`, label: `${c.name.toLowerCase()} (overall)`, get: catTotal(c),
+  })),
+  { key: "__ibs", label: "gut symptoms", get: (e) => (e.ibs?.level ? IBS_LEVELS[e.ibs.level].v : 0) },
+  { key: "__cog", label: "cognitive symptoms", get: (e) => e.mind?.cognitive ?? 0 },
+  { key: "__mood", label: "mood", get: (e) => e.mind?.mood ?? 0 },
+  ...(settings.watchlist || []).map((s) => ({
+    key: `w:${s}`, label: s, get: (e) => (e.sym || {})[s] || 0,
+  })),
+];
+const doseOf = (e, name) => {
+  const m = (e.meds || []).find((x) => x.name === name);
+  return m ? parseFloat(m.dose) || 0 : 0;
+};
+const factorsOf = (settings, days) => {
+  const hydrated = Object.values(days || {}).map(hydrate);
+  return [
+    { key: "phys", label: "physical exertion", get: (e) => e.phys ?? null },
+    { key: "cogload", label: "cognitive/social load", get: (e) => e.cog ?? null },
+    { key: "sleepQ", label: "sleep quality", get: (e) => e.sleepQ ?? null },
+    { key: "broken", label: "broken sleep", binary: true, get: (e) => (e.sleepBroken == null ? null : e.sleepBroken ? 1 : 0) },
+    ...settings.triggers.map((t) => ({
+      key: `trig:${t}`, label: t, binary: true, get: (e) => ((e.trig || []).includes(t) ? 1 : 0),
+    })),
+    ...settings.meds.flatMap((m) => {
+      const fs = [{
+        key: `med:${m.name}`, label: m.name, binary: true, med: true,
+        get: (e) => ((e.meds || []).some((x) => x.name === m.name) ? 1 : 0),
+      }];
+      /* dose becomes its own numeric factor once it has actually varied (titration) */
+      const dosesSeen = new Set(
+        hydrated.filter((e) => e.meds.some((x) => x.name === m.name)).map((e) => doseOf(e, m.name))
+      );
+      if (dosesSeen.size > 1) {
+        fs.push({ key: `dose:${m.name}`, label: `${m.name} dose`, get: (e) => doseOf(e, m.name) });
+      }
+      return fs;
+    }),
+  ];
+};
+
+/* raised bar (|r| ≥ .30, n ≥ 12): with this many outcome×factor×lag tests,
+   a lower threshold would hand back flukes dressed as findings */
+const MIN_N = 12, MIN_R = 0.3;
+
+function computeFindings(days, settings) {
+  const dates = Object.keys(days).sort();
+  if (dates.length < MIN_N) return { findings: [], nDays: dates.length };
+  const findings = [];
+  const factors = factorsOf(settings, days);
+  for (const out of outcomesOf(settings)) {
+    for (const f of factors) {
+      for (const lag of [0, 1, 2]) {
+        const xs = [], ys = [];
+        for (const d of dates) {
+          const fd = lag === 0 ? d : addDays(d, -lag);
+          const fe = days[fd];
+          if (!fe) continue;
+          const x = f.get(hydrate(fe));
+          if (x == null) continue;
+          xs.push(x);
+          ys.push(out.get(hydrate(days[d])));
+        }
+        if (xs.length < MIN_N) continue;
+        const r = pearson(xs, ys);
+        if (r == null || Math.abs(r) < MIN_R) continue;
+        findings.push({ factor: f, out, lag, r, n: xs.length });
+      }
+    }
+  }
+  findings.sort((a, b) => Math.abs(b.r) - Math.abs(a.r));
+  const seen = new Set();
+  const deduped = findings.filter((f) => {
+    const k = `${f.factor.key}|${f.out.key}`;
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+  return { findings: deduped.slice(0, 10), nDays: dates.length };
+}
+
+const LAG_LABEL = ["the same day", "the next day", "two days on"];
+function findingText(f) {
+  const lag = LAG_LABEL[f.lag];
+  const worse = f.r > 0;
+  const o = f.out.label.toLowerCase() === f.out.label ? f.out.label : f.out.label.toLowerCase();
+  if (f.factor.key === "broken") {
+    return `Broken-sleep nights track with ${worse ? "worse" : "milder"} ${o} ${lag}`;
+  }
+  if (f.factor.med) {
+    return `Days on ${f.factor.label} track with ${worse ? "worse" : "milder"} ${o} ${lag}`;
+  }
+  if (f.factor.binary) {
+    return `${f.factor.label} days track with ${worse ? "worse" : "milder"} ${o} ${lag}`;
+  }
+  if (f.factor.key === "sleepQ") {
+    return worse
+      ? `Better sleep tracks with worse ${o} ${lag} (odd — worth a look)`
+      : `Better sleep tracks with milder ${o} ${lag}`;
+  }
+  return `Higher ${f.factor.label} tracks with ${worse ? "worse" : "milder"} ${o} ${lag}`;
+}
+const strengthOf = (r) => (Math.abs(r) >= 0.6 ? "strong" : Math.abs(r) >= 0.45 ? "moderate" : "weak");
+
+/* ————— cycle ————— */
+function cycleInfo(days) {
+  const starts = Object.keys(days).filter((d) => days[d].period).sort();
+  if (starts.length === 0) return null;
+  const phaseOf = (date) => {
+    let last = null;
+    for (const s of starts) if (s <= date) last = s;
+    if (!last) return null;
+    const cd = diffDays(last, date) + 1;
+    if (cd > 45) return null;
+    if (cd <= 5) return "Menstrual";
+    if (cd <= 13) return "Follicular";
+    if (cd <= 16) return "Ovulatory";
+    return "Luteal";
+  };
+  return { starts, phaseOf };
+}
+
+const totalBurden = (e) => {
+  const h = hydrate(e);
+  return (
+    Object.values(h.sym).reduce((a, b) => a + b, 0) +
+    (h.ibs.level ? IBS_LEVELS[h.ibs.level].v : 0) +
+    (h.mind.cognitive ?? 0) + (h.mind.mood ?? 0)
+  );
+};
+
+/* ————— sample preview data (in-memory only, never saved) ————— */
+function sampleDays(settings) {
+  let seed = 42;
+  const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+  const clamp = (v) => Math.max(0, Math.min(3, Math.round(v)));
+  const days = {};
+  const t = todayStr();
+  let prevBroken = 0, prevPhys = 1, prev2Phys = 1;
+  for (let i = 45; i >= 1; i--) {
+    const d = addDays(t, -i);
+    const broken = rnd() < 0.3;
+    const phys = Math.floor(rnd() * 5);
+    const cog = Math.floor(rnd() * 5);
+    const slip = rnd() < 0.2;
+    const sym = {
+      Fatigue: clamp(prevBroken * 2 + rnd() * 1.2),
+      "Aches (non-structural)": clamp(prev2Phys / 1.4 + (rnd() - 0.5) * 1.2),
+      Headaches: clamp(rnd() * 1.6),
+      Palpitations: clamp(rnd() * 1.6),
+      Nausea: clamp(rnd() * 1.1),
+    };
+    const ibsV = slip ? 1 + Math.round(rnd()) : rnd() < 0.15 ? 1 : 0;
+    const burden = Object.values(sym).reduce((a, b) => a + b, 0) + ibsV;
+    days[d] = hydrate({
+      env: burden >= 7 ? "red" : burden >= 4 ? "amber" : "green",
+      phys, cog, sleepQ: broken ? Math.floor(rnd() * 3) : 2 + Math.floor(rnd() * 3),
+      sleepBroken: broken,
+      sym,
+      ibs: { level: ibsV === 0 ? "green" : ibsV === 1 ? "amber" : "red", tags: slip ? ["Bloating"] : [] },
+      mind: { cognitive: clamp(prevBroken * 1.5 + rnd()), mood: clamp(rnd() * 2), tags: [] },
+      trig: slip ? ["FODMAP slip"] : [],
+      meds: rnd() < 0.85 ? ["LDN"] : [],
+      period: i % 29 === 3,
+    });
+    prev2Phys = prevPhys; prevPhys = phys; prevBroken = broken ? 1 : 0;
+  }
+  return days;
+}
+
+/* ————— tiny UI atoms ————— */
+const Card = ({ children, style }) => (
+  <div style={{
+    background: T.panel, border: `1px solid ${T.line}`, borderRadius: 14,
+    padding: "16px 16px", marginBottom: 14, ...style,
+  }}>{children}</div>
+);
+const Label = ({ children, style }) => (
+  <div style={{
+    fontFamily: MONO, fontSize: 11, letterSpacing: "0.12em", textTransform: "uppercase",
+    color: T.dim, marginBottom: 10, ...style,
+  }}>{children}</div>
+);
+
+function Seg({ options, value, onChange }) {
+  return (
+    <div style={{ display: "flex", gap: 4, background: T.ink, padding: 4, borderRadius: 10 }}>
+      {options.map((o, i) => {
+        const on = value === i;
+        return (
+          <button key={o} onClick={() => onChange(on ? null : i)}
+            style={{
+              flex: 1, padding: "8px 2px", borderRadius: 7, border: "none", cursor: "pointer",
+              fontFamily: UI, fontSize: 11.5, fontWeight: on ? 600 : 400,
+              background: on ? T.panelUp : "transparent",
+              color: on ? T.text : T.dim,
+              boxShadow: on ? `inset 0 0 0 1px ${T.line}` : "none",
+            }}>{o}</button>
+        );
+      })}
+    </div>
+  );
+}
+
+function SymChip({ name, level, onTap }) {
+  const active = level > 0;
+  const alpha = [0, 0.25, 0.55, 1][level] || 0;
+  return (
+    <button onClick={onTap} style={{
+      display: "inline-flex", alignItems: "center", gap: 7,
+      padding: "8px 12px", borderRadius: 999, cursor: "pointer",
+      border: `1px solid ${active ? `rgba(217,112,95,${Math.max(alpha, 0.5)})` : T.line}`,
+      background: active ? `rgba(217,112,95,${alpha * 0.22})` : "transparent",
+      color: active ? T.text : T.faded, fontFamily: UI, fontSize: 13.5,
+    }}>
+      {name}
+      <span style={{ display: "inline-flex", gap: 3 }}>
+        {[1, 2, 3].map((i) => (
+          <span key={i} style={{
+            width: 5, height: 5, borderRadius: 3,
+            background: i <= level ? T.coral : T.line,
+          }} />
+        ))}
+      </span>
+    </button>
+  );
+}
+
+function TagChip({ name, on, onTap, color = T.marigoldFull, bg = "rgba(224,178,82,0.18)" }) {
+  return (
+    <button onClick={onTap} style={{
+      padding: "8px 12px", borderRadius: 999, cursor: "pointer",
+      border: `1px solid ${on ? color : T.line}`,
+      background: on ? bg : "transparent",
+      color: on ? T.text : T.faded, fontFamily: UI, fontSize: 13.5,
+    }}>{name}</button>
+  );
+}
+
+function LampSwitch({ levels, value, onChange, big, allowNull = true }) {
+  return (
+    <div style={{
+      display: "flex", gap: 6, background: T.ink, borderRadius: big ? 14 : 11, padding: big ? 6 : 5,
+      boxShadow: "inset 0 2px 6px rgba(0,0,0,0.45)",
+    }}>
+      {Object.entries(levels).map(([k, v]) => {
+        const on = value === k;
+        return (
+          <button key={k} onClick={() => onChange(on ? (allowNull ? null : k) : k)}
+            style={{
+              flex: 1, padding: big ? "14px 4px 12px" : "9px 4px 8px", borderRadius: big ? 10 : 8,
+              cursor: "pointer",
+              border: `1px solid ${on ? v.color : "transparent"}`,
+              background: on ? T.panelUp : "transparent",
+              transition: "background 120ms",
+            }}>
+            <div style={{
+              width: big ? 12 : 9, height: big ? 12 : 9, borderRadius: 7,
+              margin: `0 auto ${big ? 8 : 6}px`,
+              background: on ? v.color : T.line,
+              boxShadow: on ? `0 0 10px ${v.color}88` : "none",
+              transition: "all 150ms",
+            }} />
+            <div style={{
+              fontFamily: UI, fontSize: big ? 12 : 11.5, fontWeight: on ? 600 : 400,
+              color: on ? T.text : T.dim, lineHeight: 1.2,
+            }}>{v.label}</div>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/* ————— Log view ————— */
+function LogView({ data, onSaveDay }) {
+  const [date, setDate] = useState(todayStr());
+  const [entry, setEntry] = useState(() => hydrate(data.days[todayStr()]));
+  const [saved, setSaved] = useState(false);
+
+  useEffect(() => {
+    setEntry(hydrate(data.days[date]));
+    setSaved(false);
+  }, [date, data]);
+
+  const set = (patch) => { setEntry((e) => ({ ...e, ...patch })); setSaved(false); };
+  const cycleSym = (s) => {
+    const cur = entry.sym[s] || 0;
+    set({ sym: { ...entry.sym, [s]: (cur + 1) % 4 } });
+  };
+  const toggleIn = (field, val) => {
+    const list = entry[field];
+    set({ [field]: list.includes(val) ? list.filter((x) => x !== val) : [...list, val] });
+  };
+
+  const load =
+    ((data.days[addDays(date, -1)]?.phys || 0) + (data.days[addDays(date, -1)]?.cog || 0)) * 1 +
+    ((data.days[addDays(date, -2)]?.phys || 0) + (data.days[addDays(date, -2)]?.cog || 0)) * 0.6;
+
+  const save = async () => {
+    await onSaveDay(date, entry);
+    setSaved(true);
+  };
+
+  return (
+    <div>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", margin: "2px 2px 12px" }}>
+        <button onClick={() => setDate(addDays(date, -1))} style={navBtn}>‹</button>
+        <div style={{ fontFamily: MONO, fontSize: 13, color: T.text }}>
+          {date === todayStr() ? "Today · " : ""}{niceDate(date)}
+        </div>
+        <button onClick={() => setDate(addDays(date, 1))} disabled={date >= todayStr()}
+          style={{ ...navBtn, opacity: date >= todayStr() ? 0.25 : 1 }}>›</button>
+      </div>
+
+      {load >= 5 && (
+        <div style={{
+          fontFamily: MONO, fontSize: 11.5, color: T.marigoldFull,
+          border: `1px solid ${T.marigold}`, borderRadius: 10, padding: "8px 12px", marginBottom: 12,
+        }}>
+          Heavy couple of days behind this one — worth budgeting gently.
+        </div>
+      )}
+
+      <Card>
+        <Label>Envelope</Label>
+        <LampSwitch big allowNull={false} levels={ENV} value={entry.env} onChange={(v) => set({ env: v })} />
+        <div style={{
+          fontFamily: MONO, fontSize: 11.5, color: T.faded, marginTop: 8,
+          minHeight: 16, textAlign: "center",
+        }}>
+          {entry.env ? `“${ENV[entry.env].desc}”` : "Assumed green until you say otherwise"}
+        </div>
+      </Card>
+
+      <Card>
+        <Label>Exertion</Label>
+        <div style={{ fontFamily: UI, fontSize: 12.5, color: T.faded, margin: "0 0 6px" }}>Physical</div>
+        <Seg options={SCALE5} value={entry.phys} onChange={(v) => set({ phys: v })} />
+        <div style={{ fontFamily: UI, fontSize: 12.5, color: T.faded, margin: "12px 0 6px" }}>Cognitive / social</div>
+        <Seg options={SCALE5} value={entry.cog} onChange={(v) => set({ cog: v })} />
+      </Card>
+
+      <Card>
+        <Label>Sleep (last night)</Label>
+        <Seg options={SLEEP5} value={entry.sleepQ} onChange={(v) => set({ sleepQ: v })} />
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
+          <TagChip name="Unbroken" on={entry.sleepBroken === false}
+            color={T.sage} bg="rgba(143,191,159,0.16)"
+            onTap={() => set({ sleepBroken: entry.sleepBroken === false ? null : false })} />
+          <TagChip name="Broken" on={entry.sleepBroken === true}
+            color={T.coral} bg="rgba(217,112,95,0.16)"
+            onTap={() => set({ sleepBroken: entry.sleepBroken === true ? null : true })} />
+          <input value={entry.sleepH} onChange={(e) => set({ sleepH: e.target.value.replace(/[^0-9.]/g, "") })}
+            placeholder="hrs" inputMode="decimal"
+            style={{
+              width: 56, background: T.ink, border: `1px solid ${T.line}`, borderRadius: 8,
+              color: T.text, fontFamily: MONO, fontSize: 13, padding: "7px 10px", outline: "none",
+            }} />
+          <span style={{ fontFamily: UI, fontSize: 12.5, color: T.dim }}>hours</span>
+        </div>
+      </Card>
+
+      {data.settings.categories.map((cat) => (
+        <Card key={cat.id}>
+          <Label>{cat.name} — tap to cycle severity</Label>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+            {cat.items.map((s) => (
+              <SymChip key={s} name={s} level={entry.sym[s] || 0} onTap={() => cycleSym(s)} />
+            ))}
+          </div>
+        </Card>
+      ))}
+
+      <Card>
+        <Label>Gut</Label>
+        <LampSwitch allowNull={false} levels={IBS_LEVELS} value={entry.ibs.level}
+          onChange={(v) => set({ ibs: { ...entry.ibs, level: v } })} />
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 12 }}>
+          {data.settings.ibsTags.map((t) => (
+            <TagChip key={t} name={t} on={entry.ibs.tags.includes(t)}
+              onTap={() => set({
+                ibs: {
+                  ...entry.ibs,
+                  tags: entry.ibs.tags.includes(t)
+                    ? entry.ibs.tags.filter((x) => x !== t)
+                    : [...entry.ibs.tags, t],
+                },
+              })} />
+          ))}
+        </div>
+      </Card>
+
+      <Card>
+        <Label>Mind</Label>
+        <div style={{ fontFamily: UI, fontSize: 12.5, color: T.faded, margin: "0 0 6px" }}>Cognitive (fog, word-finding, focus)</div>
+        <Seg options={SEV4} value={entry.mind.cognitive}
+          onChange={(v) => set({ mind: { ...entry.mind, cognitive: v } })} />
+        <div style={{ fontFamily: UI, fontSize: 12.5, color: T.faded, margin: "12px 0 6px" }}>Mood / emotional</div>
+        <Seg options={SEV4} value={entry.mind.mood}
+          onChange={(v) => set({ mind: { ...entry.mind, mood: v } })} />
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 12 }}>
+          {data.settings.mindTags.map((t) => (
+            <TagChip key={t} name={t} on={entry.mind.tags.includes(t)}
+              onTap={() => set({
+                mind: {
+                  ...entry.mind,
+                  tags: entry.mind.tags.includes(t)
+                    ? entry.mind.tags.filter((x) => x !== t)
+                    : [...entry.mind.tags, t],
+                },
+              })} />
+          ))}
+        </div>
+      </Card>
+
+      <Card>
+        <Label>Triggers &amp; exposures</Label>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+          {data.settings.triggers.map((t) => (
+            <TagChip key={t} name={t} on={entry.trig.includes(t)} onTap={() => toggleIn("trig", t)} />
+          ))}
+        </div>
+      </Card>
+
+      <Card>
+        <Label>Medications &amp; supplements taken</Label>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+          {data.settings.meds.map((m) => {
+            const on = entry.meds.some((x) => x.name === m.name);
+            return (
+              <TagChip key={m.name} name={m.dose ? `${m.name} · ${m.dose}` : m.name} on={on}
+                color={T.sage} bg="rgba(143,191,159,0.16)"
+                onTap={() => set({
+                  meds: on
+                    ? entry.meds.filter((x) => x.name !== m.name)
+                    : [...entry.meds, { name: m.name, dose: m.dose }],
+                })} />
+            );
+          })}
+        </div>
+      </Card>
+
+      <Card>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <Label style={{ marginBottom: 0 }}>Cycle</Label>
+          <TagChip name="Period started today" on={entry.period}
+            color={T.coral} bg="rgba(217,112,95,0.18)"
+            onTap={() => set({ period: !entry.period })} />
+        </div>
+      </Card>
+
+      <Card>
+        <Label>Note</Label>
+        <textarea value={entry.note} onChange={(e) => set({ note: e.target.value })}
+          placeholder="Anything the numbers won't catch…" rows={2}
+          style={{
+            width: "100%", boxSizing: "border-box", background: T.ink, border: `1px solid ${T.line}`,
+            borderRadius: 10, color: T.text, fontFamily: UI, fontSize: 14, padding: "10px 12px",
+            outline: "none", resize: "vertical",
+          }} />
+      </Card>
+
+      <button onClick={save} style={{
+        width: "100%", padding: "14px", borderRadius: 12, border: "none", cursor: "pointer",
+        background: saved ? T.sage : T.text, color: T.ink,
+        fontFamily: UI, fontSize: 15, fontWeight: 700, transition: "background 200ms",
+      }}>
+        {saved ? "Saved ✓" : "Save check-in"}
+      </button>
+      <div style={{ height: 24 }} />
+    </div>
+  );
+}
+const navBtn = {
+  width: 38, height: 38, borderRadius: 10, border: `1px solid ${T.line}`,
+  background: "transparent", color: T.faded, fontSize: 18, cursor: "pointer",
+};
+
+/* ————— Insights view ————— */
+function InsightsView({ data }) {
+  const [preview, setPreview] = useState(false);
+  const days = preview ? sampleDays(data.settings) : data.days;
+  const { findings, nDays } = useMemo(() => computeFindings(days, data.settings), [days, data.settings]);
+  const cyc = useMemo(() => cycleInfo(days), [days]);
+
+  const phaseStats = useMemo(() => {
+    if (!cyc || cyc.starts.length < 2) return null;
+    const phases = { Menstrual: [], Follicular: [], Ovulatory: [], Luteal: [] };
+    for (const d of Object.keys(days)) {
+      const p = cyc.phaseOf(d);
+      if (!p) continue;
+      phases[p].push(totalBurden(days[d]));
+    }
+    return Object.entries(phases).map(([p, arr]) => ({
+      phase: p, n: arr.length,
+      avg: arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : null,
+    }));
+  }, [cyc, days]);
+
+  const maxAvg = phaseStats ? Math.max(...phaseStats.map((p) => p.avg || 0), 0.001) : 1;
+
+  return (
+    <div>
+      {preview && (
+        <div style={{
+          fontFamily: MONO, fontSize: 11.5, color: T.marigoldFull, marginBottom: 12,
+          border: `1px dashed ${T.marigoldFull}`, borderRadius: 10, padding: "8px 12px",
+        }}>
+          Preview mode — synthetic data, nothing saved.{" "}
+          <button onClick={() => setPreview(false)} style={{
+            background: "none", border: "none", color: T.text, cursor: "pointer",
+            fontFamily: MONO, fontSize: 11.5, textDecoration: "underline", padding: 0,
+          }}>exit</button>
+        </div>
+      )}
+
+      <Card>
+        <Label>Correlations · lags 0–2 days</Label>
+        {nDays < MIN_N ? (
+          <div style={{ fontFamily: UI, fontSize: 14, color: T.faded, lineHeight: 1.55 }}>
+            The engine needs <span style={{ fontFamily: MONO, color: T.text }}>{MIN_N} logged days</span> before
+            it will say anything — you're at <span style={{ fontFamily: MONO, color: T.text }}>{nDays}</span>.
+            It refuses to pattern-match on noise; you'd want it no other way.
+            <div style={{ marginTop: 12 }}>
+              <button onClick={() => setPreview(true)} style={{
+                padding: "8px 14px", borderRadius: 999, cursor: "pointer",
+                border: `1px solid ${T.line}`, background: "transparent",
+                color: T.faded, fontFamily: MONO, fontSize: 12,
+              }}>Preview with sample data</button>
+            </div>
+          </div>
+        ) : findings.length === 0 ? (
+          <div style={{ fontFamily: UI, fontSize: 14, color: T.faded }}>
+            No correlations above the reporting bar (|r| ≥ {MIN_R}) yet. That's a finding too.
+          </div>
+        ) : (
+          findings.map((f, i) => (
+            <div key={i} style={{
+              padding: "11px 0", borderTop: i ? `1px solid ${T.line}` : "none",
+            }}>
+              <div style={{ fontFamily: UI, fontSize: 14.5, color: T.text, lineHeight: 1.45 }}>
+                {findingText(f)}
+              </div>
+              <div style={{ fontFamily: MONO, fontSize: 11, color: T.dim, marginTop: 4 }}>
+                <span style={{
+                  color: strengthOf(f.r) === "strong" ? T.coral :
+                    strengthOf(f.r) === "moderate" ? T.marigoldFull : T.faded,
+                }}>{strengthOf(f.r).toUpperCase()}</span>
+                {"  ·  r "}{f.r.toFixed(2)}{"  ·  n "}{f.n}
+              </div>
+            </div>
+          ))
+        )}
+        {nDays >= MIN_N && (
+          <div style={{ fontFamily: MONO, fontSize: 10.5, color: T.dim, marginTop: 12, lineHeight: 1.5 }}>
+            Tested against category totals plus your watchlist — even so, some correlations will be
+            flukes. Correlation ≠ causation — treat these as leads to test, not verdicts.
+          </div>
+        )}
+      </Card>
+
+      <Card>
+        <Label>Cycle phases · avg symptom burden</Label>
+        {!phaseStats ? (
+          <div style={{ fontFamily: UI, fontSize: 14, color: T.faded, lineHeight: 1.5 }}>
+            Appears after two logged period starts — mark them in the daily check-in.
+          </div>
+        ) : (
+          phaseStats.map((p) => (
+            <div key={p.phase} style={{ display: "flex", alignItems: "center", gap: 10, padding: "6px 0" }}>
+              <div style={{ fontFamily: UI, fontSize: 13, color: T.text, width: 86 }}>{p.phase}</div>
+              <div style={{ flex: 1, height: 8, background: T.ink, borderRadius: 5, overflow: "hidden" }}>
+                <div style={{
+                  width: `${p.avg == null ? 0 : (p.avg / maxAvg) * 100}%`, height: "100%",
+                  background: T.sage, borderRadius: 5,
+                }} />
+              </div>
+              <div style={{ fontFamily: MONO, fontSize: 11, color: T.dim, width: 78, textAlign: "right" }}>
+                {p.avg == null ? "—" : p.avg.toFixed(1)} · n {p.n}
+              </div>
+            </div>
+          ))
+        )}
+      </Card>
+    </div>
+  );
+}
+
+/* ————— Trends view ————— */
+function TrendsView({ data }) {
+  const metricDefs = useMemo(() => {
+    const defs = [
+      { label: "Total burden", get: (e) => totalBurden(e) },
+      ...data.settings.categories.map((c) => ({
+        label: `${c.name} (overall)`, get: (e) => catTotal(c)(hydrate(e)),
+      })),
+      { label: "Gut", get: (e) => (hydrate(e).ibs.level ? IBS_LEVELS[hydrate(e).ibs.level].v : 0) },
+      { label: "Cognitive", get: (e) => hydrate(e).mind.cognitive ?? 0 },
+      { label: "Mood", get: (e) => hydrate(e).mind.mood ?? 0 },
+      ...allSymptoms(data.settings).map((s) => ({
+        label: s, get: (e) => (hydrate(e).sym || {})[s] || 0,
+      })),
+      { label: "Sleep quality", get: (e) => e.sleepQ ?? null },
+      { label: "Physical exertion", get: (e) => e.phys ?? null },
+    ];
+    const seen = new Set();
+    return defs.filter((d) => (seen.has(d.label) ? false : (seen.add(d.label), true)));
+  }, [data.settings]);
+  const opts = metricDefs.map((d) => d.label);
+  const [metric, setMetric] = useState("Total burden");
+  const [span, setSpan] = useState(30);
+  const dates = Object.keys(data.days).sort();
+
+  const rows = useMemo(() => {
+    const cut = addDays(todayStr(), -span);
+    const sel = dates.filter((d) => d >= cut);
+    const def = metricDefs.find((x) => x.label === metric) || metricDefs[0];
+    const raw = sel.map((d) => ({ d, v: def.get(data.days[d]), env: data.days[d].env }));
+    return raw.map((r, i) => {
+      const win = raw.slice(Math.max(0, i - 6), i + 1).map((x) => x.v).filter((v) => v != null);
+      return {
+        ...r, label: shortDate(r.d),
+        avg: win.length ? win.reduce((a, b) => a + b, 0) / win.length : null,
+      };
+    });
+  }, [dates, metric, span, data.days, metricDefs]);
+
+  return (
+    <div>
+      <Card>
+        <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
+          <select value={metric} onChange={(e) => setMetric(e.target.value)} style={{
+            flex: 1, minWidth: 150, background: T.ink, color: T.text, border: `1px solid ${T.line}`,
+            borderRadius: 9, padding: "9px 10px", fontFamily: UI, fontSize: 13.5, outline: "none",
+          }}>
+            {opts.map((o) => <option key={o}>{o}</option>)}
+          </select>
+          <div style={{ display: "flex", gap: 4 }}>
+            {[30, 90].map((s) => (
+              <button key={s} onClick={() => setSpan(s)} style={{
+                padding: "9px 13px", borderRadius: 9, cursor: "pointer", fontFamily: MONO, fontSize: 12,
+                border: `1px solid ${span === s ? T.faded : T.line}`,
+                background: span === s ? T.panelUp : "transparent",
+                color: span === s ? T.text : T.dim,
+              }}>{s}d</button>
+            ))}
+          </div>
+        </div>
+
+        {!window.Recharts ? (
+          <div style={{ fontFamily: UI, fontSize: 14, color: T.faded }}>
+            Chart library didn't load — check your connection and refresh.
+          </div>
+        ) : rows.length < 2 ? (
+          <div style={{ fontFamily: UI, fontSize: 14, color: T.faded }}>
+            Log a few days and the lines appear here.
+          </div>
+        ) : (
+          <>
+            <div style={{ height: 220 }}>
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={rows} margin={{ top: 6, right: 6, bottom: 0, left: -28 }}>
+                  <CartesianGrid stroke={T.line} strokeDasharray="2 5" vertical={false} />
+                  <XAxis dataKey="label" tick={{ fill: T.dim, fontFamily: MONO, fontSize: 10 }}
+                    tickLine={false} axisLine={{ stroke: T.line }} minTickGap={28} />
+                  <YAxis tick={{ fill: T.dim, fontFamily: MONO, fontSize: 10 }}
+                    tickLine={false} axisLine={false} allowDecimals={false} />
+                  <Tooltip contentStyle={{
+                    background: T.panelUp, border: `1px solid ${T.line}`, borderRadius: 10,
+                    fontFamily: MONO, fontSize: 12,
+                  }} labelStyle={{ color: T.faded }} itemStyle={{ color: T.text }} />
+                  <Line dataKey="v" name={metric} stroke={T.coral} strokeWidth={1.5}
+                    dot={{ r: 2, fill: T.coral, strokeWidth: 0 }} connectNulls />
+                  <Line dataKey="avg" name="7-day avg" stroke={T.sage} strokeWidth={2}
+                    dot={false} connectNulls />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+            <Label>Envelope strip</Label>
+            <div style={{ display: "flex", gap: 3, flexWrap: "wrap" }}>
+              {rows.map((r) => (
+                <div key={r.d} title={`${r.d} · ${r.env || "unrated"}`} style={{
+                  width: 11, height: 11, borderRadius: 3,
+                  background: r.env ? ENV[r.env].color : T.line,
+                  opacity: r.env ? 0.9 : 0.5,
+                }} />
+              ))}
+            </div>
+          </>
+        )}
+      </Card>
+    </div>
+  );
+}
+
+/* ————— Settings view ————— */
+function EditableList({ items, onAdd, onRemove, placeholder }) {
+  const [draft, setDraft] = useState("");
+  const add = () => {
+    const v = draft.trim();
+    if (v && !items.includes(v)) onAdd(v);
+    setDraft("");
+  };
+  return (
+    <div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 10 }}>
+        {items.map((s) => (
+          <span key={s} style={{
+            display: "inline-flex", alignItems: "center", gap: 7, padding: "7px 8px 7px 12px",
+            borderRadius: 999, border: `1px solid ${T.line}`, color: T.text,
+            fontFamily: UI, fontSize: 13,
+          }}>
+            {s}
+            <button onClick={() => onRemove(s)} style={{
+              border: "none", background: T.ink, color: T.faded, borderRadius: 999,
+              width: 18, height: 18, cursor: "pointer", fontSize: 11, lineHeight: "16px",
+            }}>×</button>
+          </span>
+        ))}
+      </div>
+      <div style={{ display: "flex", gap: 8 }}>
+        <input value={draft} onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && add()}
+          placeholder={placeholder}
+          style={{
+            flex: 1, background: T.ink, border: `1px solid ${T.line}`, borderRadius: 9,
+            color: T.text, fontFamily: UI, fontSize: 13.5, padding: "9px 12px", outline: "none",
+          }} />
+        <button onClick={add} style={{
+          padding: "9px 16px", borderRadius: 9, border: `1px solid ${T.line}`, cursor: "pointer",
+          background: T.panelUp, color: T.text, fontFamily: UI, fontSize: 13.5,
+        }}>Add</button>
+      </div>
+    </div>
+  );
+}
+
+function AddMedRow({ onAdd }) {
+  const [name, setName] = useState("");
+  const [dose, setDose] = useState("");
+  const add = () => {
+    const n = name.trim();
+    if (!n) return;
+    onAdd(n, dose.trim());
+    setName(""); setDose("");
+  };
+  const inputStyle = {
+    background: T.ink, border: `1px solid ${T.line}`, borderRadius: 9,
+    color: T.text, fontFamily: UI, fontSize: 13.5, padding: "9px 12px", outline: "none",
+  };
+  return (
+    <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
+      <input value={name} onChange={(e) => setName(e.target.value)}
+        onKeyDown={(e) => e.key === "Enter" && add()}
+        placeholder="Add a medication…" style={{ ...inputStyle, flex: 1 }} />
+      <input value={dose} onChange={(e) => setDose(e.target.value)}
+        onKeyDown={(e) => e.key === "Enter" && add()}
+        placeholder="dose" style={{ ...inputStyle, width: 72, fontFamily: MONO, fontSize: 12.5 }} />
+      <button onClick={add} style={{
+        padding: "9px 16px", borderRadius: 9, border: `1px solid ${T.line}`, cursor: "pointer",
+        background: T.panelUp, color: T.text, fontFamily: UI, fontSize: 13.5,
+      }}>Add</button>
+    </div>
+  );
+}
+
+function SettingsView({ data, onUpdate, onClear }) {
+  const [copied, setCopied] = useState(false);
+  const [confirmClear, setConfirmClear] = useState(false);
+  const [pasteOpen, setPasteOpen] = useState(false);
+  const [pasteVal, setPasteVal] = useState("");
+  const [importMsg, setImportMsg] = useState("");
+  const setSettings = (patch) => onUpdate({ ...data, settings: { ...data.settings, ...patch } });
+  const setCatItems = (id, items) =>
+    setSettings({
+      categories: data.settings.categories.map((c) => (c.id === id ? { ...c, items } : c)),
+    });
+
+  const mergeDays = (incoming, label) => {
+    let added = 0;
+    const days = { ...data.days };
+    for (const [d, e] of Object.entries(incoming)) {
+      if (!days[d]) { days[d] = e; added++; }
+    }
+    onUpdate({ ...data, days });
+    setImportMsg(`${label}: ${added} day${added === 1 ? "" : "s"} added${added < Object.keys(incoming).length ? ", existing days kept" : ""}.`);
+  };
+
+  const doPaste = () => {
+    try {
+      const parsed = JSON.parse(pasteVal);
+      const days = parsed.days || parsed;
+      if (typeof days !== "object" || Array.isArray(days)) throw new Error("shape");
+      let added = 0;
+      const merged = { ...data.days };
+      for (const [d, e] of Object.entries(days)) {
+        if (!merged[d]) { merged[d] = e; added++; }
+      }
+      const next = { ...data, days: merged };
+      if (parsed.settings) next.settings = migrate(parsed).settings;
+      onUpdate(next);
+      setImportMsg(`Pasted import: ${added} day${added === 1 ? "" : "s"} added${parsed.settings ? ", settings adopted" : ""}.`);
+      setPasteVal("");
+      setPasteOpen(false);
+    } catch {
+      setImportMsg("Couldn't read that JSON — expected Perch export format ({ days: { \"YYYY-MM-DD\": … } }).");
+    }
+  };
+
+  const exportJSON = async () => {
+    const payload = JSON.stringify(data, null, 2);
+    try {
+      await navigator.clipboard.writeText(payload);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      console.log(payload);
+    }
+  };
+
+  return (
+    <div>
+      {data.settings.categories.map((cat) => (
+        <Card key={cat.id}>
+          <Label>{cat.name} symptoms</Label>
+          <EditableList items={cat.items} placeholder="Add a symptom…"
+            onAdd={(v) => setCatItems(cat.id, [...cat.items, v])}
+            onRemove={(v) => setCatItems(cat.id, cat.items.filter((x) => x !== v))} />
+        </Card>
+      ))}
+      <Card>
+        <Label>Gut tags</Label>
+        <EditableList items={data.settings.ibsTags} placeholder="Add a tag…"
+          onAdd={(v) => setSettings({ ibsTags: [...data.settings.ibsTags, v] })}
+          onRemove={(v) => setSettings({ ibsTags: data.settings.ibsTags.filter((x) => x !== v) })} />
+      </Card>
+      <Card>
+        <Label>Mind tags</Label>
+        <EditableList items={data.settings.mindTags} placeholder="Add a tag…"
+          onAdd={(v) => setSettings({ mindTags: [...data.settings.mindTags, v] })}
+          onRemove={(v) => setSettings({ mindTags: data.settings.mindTags.filter((x) => x !== v) })} />
+      </Card>
+      <Card>
+        <Label>Triggers &amp; exposures</Label>
+        <EditableList items={data.settings.triggers} placeholder="Add a trigger…"
+          onAdd={(v) => setSettings({ triggers: [...data.settings.triggers, v] })}
+          onRemove={(v) => setSettings({ triggers: data.settings.triggers.filter((x) => x !== v) })} />
+      </Card>
+      <Card>
+        <Label>Medications &amp; supplements</Label>
+        <div style={{ fontFamily: UI, fontSize: 12.5, color: T.dim, marginBottom: 10, lineHeight: 1.5 }}>
+          Edit a dose here when you titrate — it applies from your next check-in; past days keep the dose you were on.
+        </div>
+        {data.settings.meds.map((m, i) => (
+          <div key={m.name} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+            <div style={{ flex: 1, fontFamily: UI, fontSize: 13.5, color: T.text }}>{m.name}</div>
+            <input value={m.dose} placeholder="dose"
+              onChange={(e) => setSettings({
+                meds: data.settings.meds.map((x, j) => (j === i ? { ...x, dose: e.target.value } : x)),
+              })}
+              style={{
+                width: 84, background: T.ink, border: `1px solid ${T.line}`, borderRadius: 8,
+                color: T.text, fontFamily: MONO, fontSize: 12.5, padding: "7px 10px", outline: "none",
+              }} />
+            <button onClick={() => setSettings({ meds: data.settings.meds.filter((_, j) => j !== i) })}
+              style={{
+                border: "none", background: T.ink, color: T.faded, borderRadius: 999,
+                width: 22, height: 22, cursor: "pointer", fontSize: 11,
+              }}>×</button>
+          </div>
+        ))}
+        <AddMedRow onAdd={(name, dose) => {
+          if (!data.settings.meds.some((x) => x.name === name)) {
+            setSettings({ meds: [...data.settings.meds, { name, dose }] });
+          }
+        }} />
+      </Card>
+      <Card>
+        <Label>Watchlist — tested individually</Label>
+        <div style={{ fontFamily: UI, fontSize: 12.5, color: T.dim, marginBottom: 10, lineHeight: 1.5 }}>
+          The engine tests category totals; these symptoms also get their own correlation tests.
+          Keep it to two or three — every addition raises the odds of flukes.
+        </div>
+        <EditableList items={data.settings.watchlist} placeholder="Add a symptom name…"
+          onAdd={(v) => setSettings({ watchlist: [...data.settings.watchlist, v] })}
+          onRemove={(v) => setSettings({ watchlist: data.settings.watchlist.filter((x) => x !== v) })} />
+      </Card>
+
+      <Card>
+        <Label>Import</Label>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: importMsg || pasteOpen ? 12 : 0 }}>
+          <button onClick={() => setPasteOpen(!pasteOpen)} style={{
+            padding: "9px 16px", borderRadius: 9, border: `1px solid ${T.line}`, cursor: "pointer",
+            background: "transparent", color: T.faded, fontFamily: UI, fontSize: 13.5,
+          }}>Paste JSON…</button>
+        </div>
+        {pasteOpen && (
+          <div style={{ marginBottom: importMsg ? 12 : 0 }}>
+            <textarea value={pasteVal} onChange={(e) => setPasteVal(e.target.value)}
+              placeholder='{"days": {"2026-06-01": …}}' rows={4}
+              style={{
+                width: "100%", boxSizing: "border-box", background: T.ink, border: `1px solid ${T.line}`,
+                borderRadius: 10, color: T.text, fontFamily: MONO, fontSize: 12, padding: "10px 12px",
+                outline: "none", resize: "vertical", marginBottom: 8,
+              }} />
+            <button onClick={doPaste} style={{
+              padding: "9px 16px", borderRadius: 9, border: `1px solid ${T.line}`, cursor: "pointer",
+              background: T.panelUp, color: T.text, fontFamily: UI, fontSize: 13.5,
+            }}>Import pasted data</button>
+          </div>
+        )}
+        {importMsg && (
+          <div style={{ fontFamily: MONO, fontSize: 11.5, color: T.sage }}>{importMsg}</div>
+        )}
+      </Card>
+
+      <Card>
+        <Label>Your data</Label>
+        <div style={{ fontFamily: UI, fontSize: 13.5, color: T.faded, marginBottom: 12, lineHeight: 1.5 }}>
+          {Object.keys(data.days).length} days logged. Everything lives in this device's browser storage — yours, exportable, deletable.
+        </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button onClick={exportJSON} style={{
+            padding: "9px 16px", borderRadius: 9, border: `1px solid ${T.line}`, cursor: "pointer",
+            background: T.panelUp, color: T.text, fontFamily: UI, fontSize: 13.5,
+          }}>{copied ? "Copied ✓" : "Copy JSON export"}</button>
+          <button onClick={() => (confirmClear ? onClear() : setConfirmClear(true))} style={{
+            padding: "9px 16px", borderRadius: 9, cursor: "pointer",
+            border: `1px solid ${confirmClear ? T.coral : T.line}`,
+            background: confirmClear ? "rgba(217,112,95,0.15)" : "transparent",
+            color: confirmClear ? T.coral : T.dim, fontFamily: UI, fontSize: 13.5,
+          }}>{confirmClear ? "Tap again to erase everything" : "Clear all data"}</button>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+/* ————— App ————— */
+function App() {
+  const [data, setData] = useState(null);
+  const [tab, setTab] = useState("log");
+  const [storageOk, setStorageOk] = useState(true);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const raw = localStorage.getItem(STORE_KEY);
+        setData(migrate(raw ? JSON.parse(raw) : null));
+      } catch {
+        setData(migrate(null));
+      }
+    })();
+  }, []);
+
+  const persist = async (next) => {
+    setData(next);
+    try {
+      localStorage.setItem(STORE_KEY, JSON.stringify(next));
+      setStorageOk(true);
+    } catch {
+      setStorageOk(false);
+    }
+  };
+
+  if (!data) {
+    return (
+      <div style={{ minHeight: "100vh", background: T.bg, display: "flex", alignItems: "center", justifyContent: "center" }}>
+        <div style={{ fontFamily: MONO, fontSize: 12, color: T.dim }}>opening the ledger…</div>
+      </div>
+    );
+  }
+
+  const tabs = [
+    ["log", "Log"], ["insights", "Insights"], ["trends", "Trends"], ["settings", "Settings"],
+  ];
+
+  return (
+    <div style={{ minHeight: "100vh", background: T.bg, color: T.text }}>
+      <link rel="stylesheet" href={FONT_LINK} />
+      <style>{`
+        button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible {
+          outline: 2px solid ${T.sage}; outline-offset: 2px;
+        }
+        @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+        ::placeholder { color: ${T.dim}; }
+      `}</style>
+
+      <div style={{ maxWidth: 560, margin: "0 auto", padding: "22px 16px 40px" }}>
+        <header style={{ marginBottom: 18 }}>
+          <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
+            <h1 style={{ fontFamily: DISPLAY, fontSize: 30, fontWeight: 400, margin: 0, letterSpacing: "-0.01em" }}>
+              Perch
+            </h1>
+            <span style={{ fontFamily: MONO, fontSize: 10.5, color: T.dim, letterSpacing: "0.08em" }}>
+              AN ENVELOPE, NOT A VERDICT
+            </span>
+          </div>
+          {!storageOk && (
+            <div style={{ fontFamily: MONO, fontSize: 11, color: T.coral, marginTop: 8 }}>
+              Storage unavailable — running in-memory only. Export before closing.
+            </div>
+          )}
+        </header>
+
+        <nav style={{
+          display: "flex", gap: 4, background: T.panel, border: `1px solid ${T.line}`,
+          borderRadius: 12, padding: 4, marginBottom: 16, position: "sticky", top: 8, zIndex: 5,
+        }}>
+          {tabs.map(([k, label]) => (
+            <button key={k} onClick={() => setTab(k)} style={{
+              flex: 1, padding: "9px 4px", borderRadius: 9, border: "none", cursor: "pointer",
+              fontFamily: UI, fontSize: 13, fontWeight: tab === k ? 600 : 400,
+              background: tab === k ? T.panelUp : "transparent",
+              color: tab === k ? T.text : T.dim,
+            }}>{label}</button>
+          ))}
+        </nav>
+
+        {tab === "log" && (
+          <LogView data={data} onSaveDay={(date, entry) =>
+            persist({ ...data, days: { ...data.days, [date]: entry } })} />
+        )}
+        {tab === "insights" && <InsightsView data={data} />}
+        {tab === "trends" && <TrendsView data={data} />}
+        {tab === "settings" && (
+          <SettingsView data={data} onUpdate={persist}
+            onClear={() => persist(migrate(null))} />
+        )}
+      </div>
+    </div>
+  );
+}
+
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+
+</script>
+<script>
+if ("serviceWorker" in navigator) {
+  try { navigator.serviceWorker.register("sw.js"); } catch (e) {}
+}
+</script>
+</body>
+</html>
