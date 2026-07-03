@@ -18,7 +18,8 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/prop-types/15.8.1/prop-types.min.js"></script>
-<script src="https://unpkg.com/recharts@2.12.7/umd/Recharts.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/recharts@2.12.7/umd/Recharts.min.js"
+  onerror="var s=document.createElement('script');s.src='https://unpkg.com/recharts@2.12.7/umd/Recharts.js';document.head.appendChild(s);"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
 </head>
 <body>
@@ -754,6 +755,7 @@ function InsightsView({ data }) {
 
 /* ————— Trends view ————— */
 function TrendsView({ data }) {
+  const { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } = window.Recharts || {};
   const metricDefs = useMemo(() => {
     const defs = [
       { label: "Total burden", get: (e) => totalBurden(e) },
